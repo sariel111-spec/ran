@@ -2,7 +2,7 @@ import {useCallback,useEffect,useMemo,useRef,useState} from 'react';
 import {ArrowLeft,Check,Dices,ExternalLink,Minus,Plus,Search,Settings2,Shuffle,X} from 'lucide-react';
 import {cn,label,people,who,type Person} from './people';
 import {Motif} from './motif';
-import {ago,days,flip,flippedToday,getCover,kindName,kinds,setStatus,statuses,step,tock,today,useStore,visited,
+import {ago,appLink,days,flip,openOut,preferApp,flippedToday,getCover,kindName,kinds,setStatus,statuses,step,tock,today,useStore,visited,
   type Chef,type Item,type Kind,type Series,type State,type Status} from './store';
 import {AddSheet,SettingsSheet,type Draft} from './sheets';
 
@@ -170,10 +170,10 @@ function Plaque({p,index=0,turned,lift,peek,count,set,onPick,mini,here}:{p:Perso
     <span className="pl-body">
       <span className="pl-face pl-front">
         <i className="pl-head"/>
-        <span className={`pl-name${p.also?' two':''}`}><b>{p.name}</b>{p.also&&<><i className="pl-dot"/><small>{p.also}</small></>}</span>
+        <span className={`pl-name${p.also?' two':''}`}><b><V t={p.name}/></b>{p.also&&<><i className="pl-dot"/><small><V t={p.also}/></small></>}</span>
         {!mini&&!!count&&<i className="pl-count">{cn(count)}</i>}
       </span>
-      <span className="pl-face pl-back"><Motif id={p.id}/><em>{mini?p.name:p.alias}</em></span>
+      <span className="pl-face pl-back"><Motif id={p.id}/><em><V t={mini?p.name:p.alias}/></em></span>
     </span>
   </button>;
 }
@@ -327,12 +327,19 @@ function Slip({i,showWho,picked,onOpen}:{i:Item;showWho?:boolean;picked?:boolean
     </button>
     <div className="slip-side">
       <button className={`stamp${pop?' pop':''}`} onClick={next} aria-label={`现在是${statuses.find(x=>x.id===i.status)?.name}，点一下换`}>{statuses.find(x=>x.id===i.status)?.name}</button>
-      {i.url&&<a className="go" href={i.url} target="_blank" rel="noreferrer" aria-label={`打开「${i.title}」`}><ExternalLink size={16}/></a>}
+      {i.url&&<Out url={i.url} label={`打开「${i.title}」`}><ExternalLink size={16}/></Out>}
     </div>
   </li>;
 }
 
 /* ───────── 追更 ───────── */
+
+// 往外跳：装了 App 就进 App，没有就开网页
+export function Out({url,label,after,className='go',children}:{url:string;label:string;after?:()=>void;className?:string;children:React.ReactNode}){
+  return <a className={className} href={url} target="_blank" rel="noreferrer" aria-label={label}
+    onClick={e=>{after?.();if(preferApp()&&appLink(url)){e.preventDefault();openOut(url);}}}>{children}</a>;
+}
+const V=({t}:{t:string})=><>{[...t].map((c,i)=><span key={i}>{c}</span>)}</>;
 
 function Dots({ids}:{ids:string[]}){
   return <span className="dots">{ids.map(id=>{const p=who(id);return p?<i key={id} style={{background:p.deep}} title={label(p)}/>:null;})}</span>;
@@ -363,7 +370,7 @@ function SeriesRow({x,compact,onEdit}:{x:Series;compact?:boolean;onEdit?:()=>voi
         <button onClick={()=>{step(x.id,1);buzz(6);}} aria-label="多记一话"><Plus size={14}/></button>
       </div>}
       {compact&&<span className="seen">第 {x.seen} 话</span>}
-      {x.url&&<a className="go" href={x.url} target="_blank" rel="noreferrer" onClick={()=>visited('series',x.id)} aria-label={`去看「${x.title}」`}><ExternalLink size={16}/></a>}
+      {x.url&&<Out url={x.url} label={`去看「${x.title}」`} after={()=>visited('series',x.id)}><ExternalLink size={16}/></Out>}
     </div>
   </li>;
 }
@@ -381,7 +388,7 @@ function ChefRow({x,compact,onEdit}:{x:Chef;compact?:boolean;onEdit?:()=>void}){
     </div>
     <div className="row-side">
       {!compact&&<Seen on={()=>{visited('chefs',x.id);buzz(6);}} done={fresh(x.visited)}/>}
-      {x.url?<a className="go" href={x.url} target="_blank" rel="noreferrer" onClick={()=>visited('chefs',x.id)} aria-label={`去${x.name}的主页`}><ExternalLink size={16}/></a>
+      {x.url?<Out url={x.url} label={`去${x.name}的主页`} after={()=>visited('chefs',x.id)}><ExternalLink size={16}/></Out>
         :!compact&&<button className="link" onClick={onEdit}>补上主页</button>}
     </div>
   </li>;

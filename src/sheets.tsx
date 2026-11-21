@@ -1,7 +1,7 @@
 import {useEffect,useRef,useState} from 'react';
 import {ClipboardPaste,ExternalLink,X} from 'lucide-react';
 import {guessWho,label,people} from './people';
-import {connect,disconnect,getRemote,linkCode,readLinkCode,syncNow,useSync,soundOn,setSound,tock,clearSamples,exportJson,hasSamples,importJson,kinds,putCover,readShare,remove,saveChef,saveItem,saveSeries,siteOf,statuses,
+import {preferApp,setPreferApp,openOut,appLink,connect,disconnect,getRemote,linkCode,readLinkCode,syncNow,useSync,soundOn,setSound,tock,clearSamples,exportJson,hasSamples,importJson,kinds,putCover,readShare,remove,saveChef,saveItem,saveSeries,siteOf,statuses,
   type Chef,type Item,type Kind,type Series,type State,type Status} from './store';
 
 export type Draft={type:'item'|'series'|'chef';item?:Item;series?:Series;chef?:Chef;who?:string;kind?:Kind};
@@ -132,7 +132,7 @@ export function AddSheet({draft,close}:{draft:Draft;close:()=>void}){
       {err&&<p className="err" role="alert">{err}</p>}
       <footer>
         {old&&<button className="danger" onClick={del}>{sure?'再点一次就删掉':'删掉'}</button>}
-        {old&&url&&<a className="pill" href={url} target="_blank" rel="noreferrer"><ExternalLink size={15} aria-hidden="true"/>{type==='chef'?'去主页':type==='series'?'去看':'去吃'}</a>}
+        {old&&url&&<a className="pill" href={url} target="_blank" rel="noreferrer" onClick={e=>{if(preferApp()&&appLink(url)){e.preventDefault();openOut(url);}}}><ExternalLink size={15} aria-hidden="true"/>{type==='chef'?'去主页':type==='series'?'去看':'去吃'}</a>}
         <button className="primary" onClick={save}>{old?'改好了':'收下'}</button>
       </footer>
     </div>
@@ -144,6 +144,7 @@ export function SettingsSheet({s,close}:{s:State;close:()=>void}){
   const remote=getRemote();
   const [msg,setMsg]=useState('');
   const [sound,setSnd]=useState(soundOn);
+  const [app,setApp]=useState(preferApp);
   const [owner,setOwner]=useState('sariel111-spec');
   const [repo,setRepo]=useState('ran-data');
   const [key,setKey]=useState('');
@@ -214,6 +215,7 @@ export function SettingsSheet({s,close}:{s:State;close:()=>void}){
           {hasSamples(s)&&<button className="pill" onClick={()=>{clearSamples();setMsg('示例已经清掉。');}}>清掉示例</button>}
         </div>
       </section>
+      <label className="switch"><input type="checkbox" checked={app} onChange={e=>{setPreferApp(e.target.checked);setApp(e.target.checked);}}/><span>跳转时先打开 App（小红书、抖音、B站），没装再开网页</span></label>
       <label className="switch"><input type="checkbox" checked={sound} onChange={e=>{setSound(e.target.checked);setSnd(e.target.checked);if(e.target.checked)tock();}}/><span>翻牌时有一声木头响</span></label>
       {msg&&<p className="plain" role="status">{msg}</p>}
     </div>

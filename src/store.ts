@@ -306,6 +306,37 @@ export function tock(){
     n.buffer=b;n.connect(f).connect(ng).connect(ac.destination);n.start(t);
   }catch{/* 没有声音也不要紧 */}
 }
+// 能用 App 打开的链接换成 App 的地址（小红书、抖音、B站）
+export function appLink(url:string):string{
+  let m=url.match(/xiaohongshu\.com\/(?:explore|discovery\/item)\/([0-9a-f]{24})/i);
+  if(m)return 'xhsdiscover://item/'+m[1];
+  m=url.match(/xiaohongshu\.com\/user\/profile\/([0-9a-f]{24})/i);
+  if(m)return 'xhsdiscover://user/'+m[1];
+  m=url.match(/douyin\.com\/(?:video|note)\/(\d+)/i);
+  if(m)return 'snssdk1128://aweme/detail/'+m[1];
+  m=url.match(/bilibili\.com\/video\/(BV[0-9A-Za-z]+)/);
+  if(m)return 'bilibili://video/'+m[1];
+  return '';
+}
+export const preferApp=()=>{try{return localStorage.getItem('ran-app')!=='0';}catch{return true;}};
+export const setPreferApp=(on:boolean)=>{try{localStorage.setItem('ran-app',on?'1':'0');}catch{/* 存不了就算了 */}};
+const phone=()=>/iphone|ipad|ipod|android/i.test(navigator.userAgent)||(navigator.maxTouchPoints>1&&/macintosh/i.test(navigator.userAgent));
+// 先试着叫 App；一秒多之后页面还在眼前，说明 App 没接住，再开网页
+export function openOut(url:string){
+  const app=preferApp()?appLink(url):'';
+  if(!app){if(!window.open(url,'_blank','noopener'))location.href=url;return;}
+  const t0=Date.now();
+  let left=false;
+  const mark=()=>{left=true;};
+  addEventListener('blur',mark);addEventListener('pagehide',mark);document.addEventListener('visibilitychange',mark);
+  location.href=app;
+  setTimeout(()=>{
+    removeEventListener('blur',mark);removeEventListener('pagehide',mark);document.removeEventListener('visibilitychange',mark);
+    if(left||document.hidden||!document.hasFocus()||Date.now()-t0>2800)return;
+    if(phone())location.href=url;
+    else if(!window.open(url,'_blank','noopener'))location.href=url;
+  },1400);
+}
 export function ago(t:number):string{
   if(!t)return '还没去看过';
   const d=Math.floor((Date.now()-t)/864e5);
