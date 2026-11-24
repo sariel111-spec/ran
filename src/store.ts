@@ -1,4 +1,5 @@
 import {useSyncExternalStore} from 'react';
+import {guessWho,who as whoIs} from './people';
 
 export type Kind='plot'|'fic'|'art'|'comic'|'ao3'|'misc';
 export const kinds:{id:Kind;name:string}[]=[
@@ -11,9 +12,13 @@ export type Status='want'|'eating'|'done';
 export const statuses:{id:Status;name:string}[]=[{id:'want',name:'想吃'},{id:'eating',name:'在吃'},{id:'done',name:'吃完'}];
 
 type Base={id:string;who:string[];site:string;url:string;note:string;sample?:boolean;created:number;updated:number};
-export type Item=Base&{kind:Kind;title:string;by:string;taste:number;status:Status;cover?:string};
-export type Series=Base&{title:string;by:string;seen:number;total:number;state:'on'|'end'|'pit';visited:number};
-export type Chef=Base&{name:string;visited:number};
+// cover：存在本机和仓库里的图（自己放的，或缓存下来的缩略图）；img：帖子封面的地址
+export type Item=Base&{kind:Kind;title:string;by:string;taste:number;status:Status;cover?:string;img?:string;ratio?:number;video?:boolean};
+// news：自动去看时发现的作品，at 是发现的时间（0 表示第一次记下的旧作）；checked：上次自动去看的时间
+export type News={id:string;title:string;url:string;img?:string;at:number};
+type Watched={visited:number;news?:News[];checked?:number};
+export type Series=Base&Watched&{title:string;by:string;seen:number;total:number;state:'on'|'end'|'pit'};
+export type Chef=Base&Watched&{name:string};
 export type State={items:Item[];series:Series[];chefs:Chef[];flips:Record<string,string[]>;dead:Record<string,number>};
 
 const DB='ran-site',STORE='kv';
@@ -37,7 +42,15 @@ let ready=false;
 const subs=new Set<()=>void>();
 const emit=()=>subs.forEach(f=>f());
 let pushTimer=0;
-const commit=(next:State)=>{state=next;emit();void setKey('state',next);clearTimeout(pushTimer);pushTimer=window.setTimeout(()=>{void syncNow();},2500);};
+// 同一个浏览器里开着的别的标签页：这边一存，那边跟着读一遍，免得拿旧的盖掉新的
+const bc=typeof BroadcastChannel==='function'?new BroadcastChannel('ran-site'):null;
+const commit=(next:State)=>{state=next;emit();void setKey('state',next).then(()=>bc?.postMessage(1));clearTimeout(pushTimer);pushTimer=window.setTimeout(()=>{void syncNow();},2500);};
+async function reread(){
+  const saved=await getKey<State>('state');
+  if(!saved||!Array.isArray(saved.items))return;
+  const merged=merge(state,clean(saved));
+  if(canon(merged)!==canon(state)){state=merged;emit();}
+}
 
 export const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 export const today=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;};
@@ -54,6 +67,10 @@ export async function boot(){
   // 另一台设备可能正在用：这台亮着的时候，隔一会儿去看看它有没有新东西
   setInterval(()=>{if(remote&&document.visibilityState==='visible'&&navigator.onLine!==false)void syncNow(true);},20000);
   addEventListener('pagehide',()=>{void setKey('state',state);});
+  if(bc)bc.onmessage=()=>{void reread();};
+  addEventListener('hashchange',inbox);inbox();
+  (window as unknown as {ran:unknown}).ran={key:inboxKey,known,take:(p:Pack)=>(last=take(p)),watch,last:()=>last,settle};
+  setTimeout(()=>{void cacheCovers();},1500);
 }
 export const isReady=()=>ready;
 export function useStore():State{
@@ -87,17 +104,38 @@ export function saveChef(it:Partial<Chef>&{name:string}){
     commit({...state,chefs:state.chefs.map(x=>x.id===it.id?{...x,...it,sample:false,updated:now} as Chef:x)});
   else commit({...state,chefs:[{who:[],site:'',url:'',note:'',visited:0,created:now,updated:now,...it,id:uid()} as Chef,...state.chefs]});
 }
+// 同一位厨子在不同时候可能记成了不同的编号，按主页认人
+export const chefKey=(url:string)=>{
+  let m=url.match(/douyin\.com\/user\/([\w-]{10,})/);if(m)return 'c-dy-'+m[1];
+  m=url.match(/xiaohongshu\.com\/user\/profile\/([0-9a-f]{24})/i);if(m)return 'c-xhs-'+m[1];
+  return '';
+};
 export function remove(type:'items'|'series'|'chefs',id:string){
-  // 删掉的东西留一个记号，别的设备同步时才知道它是被删了，而不是还没收到
-  commit({...state,[type]:(state[type] as Base[]).filter(x=>x.id!==id),dead:{...state.dead,[id]:Date.now()}} as State);
+  // 删掉的东西留一个记号，别的设备同步时才知道它是被删了，而不是还没收到；自动更新也凭这个记号不再把它加回来
+  const now=Date.now(),dead={...state.dead,[id]:now};
+  if(type==='chefs'){
+    const c=state.chefs.find(x=>x.id===id);
+    if(c){dead['chef:'+c.name]=now;const k=chefKey(c.url);if(k)dead[k]=now;}
+  }
+  commit({...state,[type]:(state[type] as Base[]).filter(x=>x.id!==id),dead} as State);
+}
+// 删错了，放回去
+export function restore(type:'items'|'series'|'chefs',rec:Item|Series|Chef){
+  if((state[type] as Base[]).some(x=>x.id===rec.id))return;
+  const dead={...state.dead};
+  if(type==='chefs'){delete dead['chef:'+(rec as Chef).name];const k=chefKey(rec.url);if(k&&k!==rec.id)delete dead[k];}
+  commit({...state,[type]:[{...rec,updated:Date.now()},...(state[type] as Base[])],dead} as State);
 }
 export function step(id:string,by:number){
   commit({...state,series:state.series.map(x=>x.id===id?{...x,seen:Math.max(0,x.seen+by),visited:Date.now(),updated:Date.now()}:x)});
 }
 export const days=(n:number)=>{const out:string[]=[];for(let i=n-1;i>=0;i--){const d=new Date(Date.now()-i*864e5);out.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`);}return out;};
-export function visited(type:'series'|'chefs',id:string){
-  commit({...state,[type]:(state[type] as (Series|Chef)[]).map(x=>x.id===id?{...x,visited:Date.now()}:x)} as State);
+export function visited(type:'series'|'chefs',id:string,when=Date.now()){
+  // 要连 updated 一起改：同步时两边谁新听谁的，不改的话这一下会被仓库里的旧记录盖回去
+  const now=Date.now();
+  commit({...state,[type]:(state[type] as (Series|Chef)[]).map(x=>x.id===id?{...x,visited:when,updated:now}:x)} as State);
 }
+export const hasNew=(x:Series|Chef)=>(x.news??[]).some(n=>n.at>x.visited);
 export function setStatus(id:string,status:Status){
   commit({...state,items:state.items.map(x=>x.id===id?{...x,status,updated:Date.now()}:x)});
 }
@@ -107,7 +145,7 @@ export function clearSamples(){
 export const hasSamples=(s:State)=>s.items.some(x=>x.sample)||s.series.some(x=>x.sample)||s.chefs.some(x=>x.sample);
 
 // 图片：缩到 900px 以内存进本机，连上仓库后也会传上去
-export async function putCover(file:File):Promise<string>{
+export async function putCover(file:File):Promise<{id:string;ratio:number}>{
   const url=URL.createObjectURL(file);
   try{
     const img=await new Promise<HTMLImageElement>((ok,no)=>{const i=new Image();i.onload=()=>ok(i);i.onerror=no;i.src=url;});
@@ -116,21 +154,231 @@ export async function putCover(file:File):Promise<string>{
     c.getContext('2d')!.drawImage(img,0,0,c.width,c.height);
     const id=uid()+'.jpg';await setKey('asset:'+id,c.toDataURL('image/jpeg',.86));
     await setKey('dirty',[...((await getKey<string[]>('dirty'))??[]),id]);
-    return id;
+    return {id,ratio:c.height/c.width};
   }finally{URL.revokeObjectURL(url);}
 }
+// 从仓库取图一次只走四个，免得一屏几十张同时去要
+let lane=0;const waitLane:(()=>void)[]=[];
+const queued=async<T,>(fn:()=>Promise<T>):Promise<T>=>{
+  if(lane>=4)await new Promise<void>(ok=>waitLane.push(ok));
+  lane++;try{return await fn();}finally{lane--;waitLane.shift()?.();}
+};
 export async function getCover(id:string):Promise<string|undefined>{
   const here=await getKey<string>('asset:'+id);
   if(here||!remote)return here;
-  try{
-    const r=await api('assets/'+encodeURIComponent(id));
-    if(!r.ok)return undefined;
-    const j=await r.json();
-    const data='data:image/jpeg;base64,'+String(j.content??'').replace(/\s/g,'');
-    if(data.length<40)return undefined;
-    await setKey('asset:'+id,data);return data;
-  }catch{return undefined;}
+  return queued(async()=>{
+    try{
+      const r=await api('assets/'+encodeURIComponent(id));
+      if(!r.ok)return undefined;
+      const j=await r.json();
+      const data='data:image/jpeg;base64,'+String(j.content??'').replace(/\s/g,'');
+      if(data.length<40)return undefined;
+      await setKey('asset:'+id,data);return data;
+    }catch{return undefined;}
+  });
 }
+
+/* ───────── 封面 ───────── */
+
+// 小红书的封面换成不带时效的地址；别家的原样留着
+export function normImg(src:unknown):string{
+  if(typeof src!=='string'||!/^https:\/\//.test(src))return '';
+  const m=src.match(/xhscdn\.com\/(?:\d{12}\/[0-9a-f]{32}\/)?((?:[\w-]+\/)*[0-9a-z]{30,})(?:!|$|\?)/i);
+  if(m)return 'https://ci.xiaohongshu.com/'+m[1]+'?imageView2/2/w/480/format/jpg';
+  return src;
+}
+// 抖音的封面地址带着过期时间，大约两周
+const expiry=(u:string)=>{const m=u.match(/[?&]x-expires=(\d{9,})/);return m?+m[1]*1000:0;};
+export const imgAlive=(u:string)=>{const e=expiry(u);return !e||e>Date.now()+60000;};
+// 由真人出演的角色，帖子封面多半是演员本人的照片，不自动取；想要封面可以自己放一张图
+const NOCOVER=['pp','newt'];
+const coverOk=(ids:string[])=>!ids.some(id=>NOCOVER.includes(id));
+const clampRatio=(r:unknown)=>typeof r==='number'&&r>0?Math.round(Math.min(2,Math.max(.4,r))*1000)/1000:undefined;
+
+// 会过期的封面：趁还没过期缩成一张小图存下来，以后就不怕它失效，手机上也看得到
+let caching:Promise<number>|null=null;
+const gaveUp=new Set<string>();
+export function cacheCovers():Promise<number>{
+  return caching??=(async()=>{
+    let made=0;
+    const todo=state.items.filter(i=>!i.cover&&i.img&&expiry(i.img)&&imgAlive(i.img)&&!gaveUp.has(i.id)&&coverOk(i.who));
+    const done:Record<string,{cover:string;ratio:number}>={};
+    const flush=async()=>{
+      const ids=Object.keys(done);if(!ids.length)return;
+      const got={...done};for(const k of ids)delete done[k];
+      await setKey('dirty',[...new Set([...((await getKey<string[]>('dirty'))??[]),...ids.map(k=>got[k].cover)])]);
+      const now=Date.now();
+      commit({...state,items:state.items.map(x=>got[x.id]&&!x.cover?{...x,...got[x.id],updated:now}:x)});
+    };
+    let at=0;
+    const worker=async()=>{
+      while(at<todo.length){
+        const i=todo[at++];
+        try{
+          const r=await fetch(i.img!,{referrerPolicy:'no-referrer'});
+          if(!r.ok)throw new Error(String(r.status));
+          const bmp=await createImageBitmap(await r.blob());
+          const k=Math.min(1,360/bmp.width);
+          const c=document.createElement('canvas');c.width=Math.round(bmp.width*k);c.height=Math.round(bmp.height*k);
+          c.getContext('2d')!.drawImage(bmp,0,0,c.width,c.height);bmp.close?.();
+          const id='t-'+i.id+'.jpg';
+          await setKey('asset:'+id,c.toDataURL('image/jpeg',.8));
+          done[i.id]={cover:id,ratio:clampRatio(c.height/c.width)??1.25};made++;
+          if(Object.keys(done).length>=12)await flush();
+        }catch{gaveUp.add(i.id);}
+      }
+    };
+    await Promise.all([worker(),worker(),worker()]);
+    await flush();
+    return made;
+  })().finally(()=>{caching=null;});
+}
+
+/* ───────── 收件口：自动更新把东西交到这里，由网站自己查重、认删、归档 ───────── */
+
+type RawItem={id?:string;who?:string[];kind?:string;title?:string;by?:string;site?:string;url?:string;img?:string;ratio?:number;video?:boolean;text?:string};
+type RawChef={id?:string;name?:string;who?:string[];site?:string;url?:string;note?:string};
+type RawWork={id?:string;title?:string;url?:string;img?:string};
+export type Pack={items?:RawItem[];chefs?:RawChef[];covers?:RawItem[];news?:Record<string,{works?:RawWork[];total?:number}>};
+type Taken={items:number;chefs:number;covers:number;checked:number;fresh:string[];skipped:number;error?:string};
+let last:Taken|null=null;
+const WATCH='ran-routine-watch';
+const str=(v:unknown,max:number)=>typeof v==='string'?v.replace(/\s+/g,' ').trim().slice(0,max):'';
+const link=(v:unknown)=>typeof v==='string'&&/^https:\/\//.test(v)?v.slice(0,600):'';
+const inboxKey=()=>{
+  try{
+    let k=localStorage.getItem('ran-inbox-key');
+    if(!k){k=uid()+uid();localStorage.setItem('ran-inbox-key',k);}
+    return k;
+  }catch{return '';}
+};
+// 这些编号里，哪些已经有了，或者是她删掉的
+function known(ids:string[]):string[]{
+  const have=new Set([...state.items,...state.series,...state.chefs].map(x=>x.id));
+  return (Array.isArray(ids)?ids:[]).filter(id=>have.has(id)||state.dead[id]!==undefined);
+}
+const watch=()=>[
+  ...state.chefs.map(x=>({id:x.id,type:'chef',name:x.name,by:'',site:x.site,url:x.url})),
+  ...state.series.map(x=>({id:x.id,type:'series',name:x.title,by:x.by,site:x.site,url:x.url})),
+];
+export function take(p:Pack):Taken{
+  const res:Taken={items:0,chefs:0,covers:0,checked:0,fresh:[],skipped:0};
+  if(!p||typeof p!=='object')return {...res,error:'bad'};
+  const now=Date.now();
+  let {items,chefs,series}=state;
+  const have=new Set([...items,...series,...chefs].map(x=>x.id));
+
+  const add:Item[]=[];
+  (Array.isArray(p.items)?p.items:[]).forEach((r,n)=>{
+    const id=str(r?.id,60),title=str(r?.title,80);
+    if(!id||!title)return;
+    if(have.has(id)||state.dead[id]!==undefined){res.skipped++;return;}
+    let ids=(Array.isArray(r.who)?r.who:[]).filter(x=>typeof x==='string'&&whoIs(x));
+    if(!ids.length)ids=guessWho([title,r.by,r.text].join(' '));
+    if(!ids.length){res.skipped++;return;}
+    const url=link(r.url),img=coverOk(ids)?normImg(r.img):'';
+    have.add(id);
+    add.push({id,who:[...new Set(ids)],kind:kinds.some(k=>k.id===r.kind)?r.kind as Kind:'misc',title,by:str(r.by,40),site:str(r.site,12)||siteOf(url),url,note:'',taste:0,status:'done',
+      ...(img?{img,ratio:clampRatio(r.ratio)}:{}),...(r.video?{video:true}:{}),created:now-n,updated:now});
+  });
+  res.items=add.length;
+  if(add.length)items=[...add,...items];
+
+  // 已经收着的条目：补上封面
+  const cov=new Map<string,RawItem>();
+  for(const r of [...(Array.isArray(p.covers)?p.covers:[]),...(Array.isArray(p.items)?p.items:[])])if(r&&typeof r.id==='string')cov.set(r.id,r);
+  items=items.map(x=>{
+    const r=cov.get(x.id);
+    if(!r||x.updated===now||!coverOk(x.who))return x;
+    const img=normImg(r.img);
+    const stale=!x.img||(!x.cover&&!imgAlive(x.img));
+    const next={...x};
+    if(img&&stale&&img!==x.img){next.img=img;const k=clampRatio(r.ratio);if(k&&!x.cover)next.ratio=k;}
+    if(r.video&&!x.video)next.video=true;
+    if(next.img===x.img&&next.video===x.video)return x;
+    res.covers++;return {...next,updated:now};
+  });
+
+  const addChefs:Chef[]=[];
+  for(const r of Array.isArray(p.chefs)?p.chefs:[]){
+    const name=str(r?.name,40);if(!name)continue;
+    const url=link(r.url),id=chefKey(url)||str(r.id,60)||'c-'+uid();
+    const all=[...chefs,...addChefs];
+    if(have.has(id)||state.dead[id]!==undefined||state.dead['chef:'+name]!==undefined||all.some(c=>c.name===name||(url&&chefKey(c.url)===chefKey(url)&&chefKey(url)))){res.skipped++;continue;}
+    const ids=(Array.isArray(r.who)?r.who:[]).filter(x=>typeof x==='string'&&whoIs(x));
+    have.add(id);
+    addChefs.push({id,name,who:ids,site:str(r.site,12)||siteOf(url),url,note:str(r.note,80),visited:0,created:now,updated:now});
+  }
+  res.chefs=addChefs.length;
+  if(addChefs.length)chefs=[...addChefs,...chefs];
+
+  // 自动去看的结果：和上次看到的比，多出来的就是更新
+  if(p.news&&typeof p.news==='object'){
+    let base:Record<string,string[]>={};
+    try{base=JSON.parse(localStorage.getItem(WATCH)||'{}')||{};}catch{/* 记录坏了就重新记 */}
+    const apply=<T extends Series|Chef>(x:T):T=>{
+      const r=p.news![x.id];if(!r)return x;
+      const ok=coverOk(x.who);
+      const works=(Array.isArray(r.works)?r.works:[]).map(w=>({id:str(w?.id,60),title:str(w?.title,60),url:link(w?.url),img:ok?normImg(w?.img):''})).filter(w=>w.id);
+      res.checked++;
+      const prev=base[x.id];
+      const old=x.news??[];
+      let news=old;
+      if(prev){
+        const fresh=works.filter(w=>!prev.includes(w.id)&&!old.some(n=>n.id===w.id));
+        if(fresh.length){
+          news=[...fresh.map(w=>({id:w.id,title:w.title||'新作',url:w.url,...(w.img?{img:w.img}:{}),at:now})),...old].slice(0,6);
+          res.fresh.push(('name' in x?x.name:x.title)+'：'+fresh.map(w=>w.title||'新作').join('、'));
+        }
+      }
+      if(!news.length&&works.length)news=works.slice(0,3).map(w=>({id:w.id,title:w.title||'作品',url:w.url,...(w.img?{img:w.img}:{}),at:0}));
+      if(works.length)base[x.id]=[...new Set([...works.map(w=>w.id),...(prev??[])])].slice(0,80);
+      const next={...x,news,checked:now,updated:now} as T;
+      if('total' in next&&typeof r.total==='number'&&r.total>(next as Series).total)(next as Series).total=Math.floor(r.total);
+      return next;
+    };
+    chefs=chefs.map(apply);series=series.map(apply);
+    const live=new Set([...chefs,...series].map(x=>x.id));
+    for(const k of Object.keys(base))if(!live.has(k))delete base[k];
+    try{localStorage.setItem(WATCH,JSON.stringify(base));}catch{/* 存不了就下次再记 */}
+  }
+
+  if(res.items||res.chefs||res.covers||res.checked)commit({...state,items,chefs,series});
+  try{sessionStorage.setItem('ran-last',JSON.stringify(res));}catch{/* 不要紧 */}
+  setTimeout(()=>{void cacheCovers();},300);
+  return res;
+}
+// 别的标签页把东西编进地址的 # 后面交过来：#inbox=<本机口令>.<内容>
+function inbox(){
+  const m=/^#inbox=([a-z0-9]{8,40})\.([\w-]+)$/.exec(location.hash);
+  if(!m)return;
+  history.replaceState(null,'',location.pathname+location.search+'#/');
+  if(m[1]!==inboxKey()){last={items:0,chefs:0,covers:0,checked:0,fresh:[],skipped:0,error:'key'};return;}
+  try{
+    const bin=atob(m[2].replace(/-/g,'+').replace(/_/g,'/'));
+    last=take(JSON.parse(new TextDecoder().decode(Uint8Array.from(bin,c=>c.charCodeAt(0)))));
+  }catch{last={items:0,chefs:0,covers:0,checked:0,fresh:[],skipped:0,error:'bad'};}
+}
+// 等封面存完、同步完
+async function settle(){
+  const made=await cacheCovers();
+  await syncNow();
+  const left=((await getKey<string[]>('dirty'))??[]).length;
+  if(left)await syncNow();
+  return {cached:made,waiting:state.items.filter(i=>!i.cover&&i.img&&expiry(i.img)&&imgAlive(i.img)&&coverOk(i.who)&&!gaveUp.has(i.id)).length,
+    unsent:((await getKey<string[]>('dirty'))??[]).length,sync:sync.state,covered:state.items.filter(i=>i.cover||i.img).length,items:state.items.length};
+}
+
+/* ───────── 一句提示 ───────── */
+
+export type Toast={text:string;undo?:()=>void;n:number};
+let toast:Toast|null=null,toastTimer=0;
+export function say(text:string,undo?:()=>void){
+  toast={text,undo,n:Date.now()};emit();
+  clearTimeout(toastTimer);toastTimer=window.setTimeout(()=>{toast=null;emit();},undo?6000:2600);
+}
+export const hush=()=>{clearTimeout(toastTimer);toast=null;emit();};
+export function useToast():Toast|null{return useSyncExternalStore(f=>{subs.add(f);return()=>{subs.delete(f);};},()=>toast);}
 
 export function exportJson(){return JSON.stringify({app:APP,...state},null,1);}
 export function importJson(text:string){
@@ -218,7 +466,7 @@ export function syncNow(quiet=false):Promise<void>{
         }else if(head.status!==404)throw new Error(head.status===401?'令牌失效了，请在设置里重新填写':head.status===403?'令牌没有这个仓库的读写权限':`读取失败（${head.status}）`);
         const merged=theirs?merge(state,theirs):state;
         if(canon(merged)!==canon(state)){state=merged;await setKey('state',state);emit();}
-        for(const id of (await getKey<string[]>('dirty'))??[]){
+        for(const id of ((await getKey<string[]>('dirty'))??[]).slice(0,25)){
           const data=await getKey<string>('asset:'+id);
           if(data){
             const r=await api('assets/'+encodeURIComponent(id),{method:'PUT',body:JSON.stringify({message:'add '+id,content:data.slice(data.indexOf(',')+1)})});
@@ -236,7 +484,11 @@ export function syncNow(quiet=false):Promise<void>{
       if(e instanceof ForeignRepo){remote=null;await delKey('remote');setSync('error','已停止同步：'+FOREIGN);}
       else setSync('error',(e as Error).message||'同步失败，稍后会再试');
     }
-  })().finally(()=>{running=null;if(again){again=false;void syncNow();}});
+  })().finally(()=>{
+    running=null;
+    if(again){again=false;void syncNow();}
+    else if(sync.state==='idle')void getKey<string[]>('dirty').then(d=>{if(d?.length&&remote)setTimeout(()=>{void syncNow(true);},800);});
+  });
   return running;
 }
 export async function connect(r:Remote){

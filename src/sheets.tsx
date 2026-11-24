@@ -1,7 +1,7 @@
 import {useEffect,useRef,useState} from 'react';
 import {ClipboardPaste,ExternalLink,X} from 'lucide-react';
 import {guessWho,label,people} from './people';
-import {preferApp,setPreferApp,openOut,appLink,connect,disconnect,getRemote,linkCode,readLinkCode,syncNow,useSync,soundOn,setSound,tock,clearSamples,exportJson,hasSamples,importJson,kinds,putCover,readShare,remove,saveChef,saveItem,saveSeries,siteOf,statuses,
+import {preferApp,setPreferApp,openOut,appLink,connect,disconnect,getRemote,linkCode,readLinkCode,syncNow,useSync,soundOn,setSound,tock,clearSamples,exportJson,getCover,hasSamples,imgAlive,importJson,kinds,normImg,putCover,say,restore,readShare,remove,saveChef,saveItem,saveSeries,siteOf,statuses,
   type Chef,type Item,type Kind,type Series,type State,type Status} from './store';
 
 export type Draft={type:'item'|'series'|'chef';item?:Item;series?:Series;chef?:Chef;who?:string;kind?:Kind};
@@ -38,6 +38,12 @@ export function AddSheet({draft,close}:{draft:Draft;close:()=>void}){
   const [total,setTotal]=useState(String(draft.series?.total||''));
   const [st,setSt]=useState<Series['state']>(draft.series?.state??'on');
   const [cover,setCover]=useState(draft.item?.cover);
+  const [img,setImg]=useState(draft.item?.img??'');
+  const [ratio,setRatio]=useState(draft.item?.ratio);
+  const [shot,setShot]=useState('');
+  useEffect(()=>{let on=true;setShot('');if(cover)void getCover(cover).then(v=>{if(on&&v)setShot(v);});return()=>{on=false;};},[cover]);
+  const linked=normImg(img.trim());
+  const preview=shot||(linked&&imgAlive(linked)?linked:'');
   const [sure,setSure]=useState(false);
   const [err,setErr]=useState('');
   const file=useRef<HTMLInputElement>(null);
@@ -67,14 +73,15 @@ export function AddSheet({draft,close}:{draft:Draft;close:()=>void}){
     const name=title.trim();
     if(!name){setErr(type==='chef'?'给这位厨子写个名字。':'写个标题，之后才找得到它。');return;}
     const common={id:old?.id,who:whose,url:url.trim(),site:siteOf(url.trim()),note:note.trim()};
-    if(type==='item')saveItem({...common,title:name,by:by.trim(),kind,status,taste,cover});
+    if(type==='item')saveItem({...common,title:name,by:by.trim(),kind,status,taste,cover,img:linked||undefined,ratio});
     else if(type==='series')saveSeries({...common,title:name,by:by.trim(),seen:Math.max(0,parseInt(seen)||0),total:Math.max(0,parseInt(total)||0),state:st});
     else saveChef({...common,name});
     close();
   };
   const del=()=>{
     if(!sure){setSure(true);return;}
-    remove(type==='item'?'items':type==='series'?'series':'chefs',old!.id);close();
+    const list=type==='item'?'items':type==='series'?'series':'chefs';
+    remove(list,old!.id);say(`删掉了「${title.trim()||'这一条'}」`,()=>restore(list,old!));close();
   };
 
   return <Sheet title={old?`改一改这${type==='chef'?'位厨子':type==='series'?'个系列':'篇'}`:'收一口'} close={close}>
@@ -123,10 +130,17 @@ export function AddSheet({draft,close}:{draft:Draft;close:()=>void}){
 
       <label className="field"><span>备注</span><textarea value={note} onChange={e=>setNote(e.target.value)} rows={2} placeholder={type==='item'?'哪里好吃':''}/></label>
 
-      {type==='item'&&<div className="field">
-        <span>封面（可以不放）</span>
-        <input ref={file} type="file" accept="image/*" hidden onChange={async e=>{const f=e.target.files?.[0];if(f)setCover(await putCover(f));}}/>
-        <button type="button" className="link" onClick={()=>file.current?.click()}>{cover?'换一张自己存的图':'放一张自己存的图'}</button>
+      {type==='item'&&<div className="field cover-field">
+        <span>封面</span>
+        <div className="cover-row">
+          {preview?<img src={preview} alt="现在的封面" referrerPolicy="no-referrer"/>:<i aria-hidden="true">还没有图</i>}
+          <div>
+            <input ref={file} type="file" accept="image/*" hidden onChange={async e=>{const f=e.target.files?.[0];if(!f)return;const c=await putCover(f);setCover(c.id);setRatio(c.ratio);}}/>
+            <button type="button" className="link" onClick={()=>file.current?.click()}>{cover?'换一张自己存的图':'放一张自己存的图'}</button>
+            {(cover||img)&&<button type="button" className="link" onClick={()=>{setCover(undefined);setImg('');setRatio(undefined);}}>不要封面</button>}
+          </div>
+        </div>
+        <input value={img} onChange={e=>{setImg(e.target.value);if(!cover)setRatio(undefined);}} inputMode="url" placeholder="或者贴一个图片链接" aria-label="封面图片链接"/>
       </div>}
 
       {err&&<p className="err" role="alert">{err}</p>}
